@@ -1,0 +1,10 @@
+{
+  "n": 4,
+  "tool": "writeFile",
+  "input": {
+    "path": "src/routes.ts",
+    "content": "import type { Express, Request, Response } from 'express';\n\nexport function registerRoutes(app: Express): void {\n  app.get('/api/version', (_req: Request, res: Response) => {\n    res.json({\n      name: 'init-salescoach-mvp',\n      version: '0.1.0'\n    });\n  });\n\n  // Placeholder endpoints to keep the API surface stable for the MVP.\n  // The full EventBus-only orchestration and MongoDB persistence will be added next.\n\n  app.post('/api/calls', async (req: Request, res: Response) => {\n    const body = req.body as Partial<{ callId: string }>;\n    const callId = body.callId;\n\n    if (!callId || typeof callId !== 'string') {\n      res.status(400).json({ error: 'callId is required' });\n      return;\n    }\n\n    res.status(201).json({ callId, createdAtIso: new Date().toISOString() });\n  });\n\n  app.get('/api/calls/:callId', async (req: Request, res: Response) => {\n    const { callId } = req.params;\n    if (!callId) {\n      res.status(400).json({ error: 'callId is required' });\n      return;\n    }\n\n    res.json({\n      callId,\n      status: 'initialized',\n      updatedAtIso: new Date().toISOString()\n    });\n  });\n}\n"
+  },
+  "result": "OK: wrote 1122 bytes to src/routes.ts",
+  "tsIso": "2026-06-17T01:51:30.336Z"
+}
