@@ -1,0 +1,230 @@
+{
+  "version": "1.0",
+  "interfaces": [
+    {
+      "name": "WebSocket: live-call channel",
+      "type": "api",
+      "description": "Client<->backend WebSocket for streaming diarized transcript updates and coaching cues; supports reconnect to preserve call state.",
+      "contract": "AC-05/AC-06/AC-09/AC-11/AC-12: WebSocket messages MUST include callId. On reconnect (max 5 attempts, 3s delay), backend MUST rehydrate call state from websocketCallStateSnapshot in MongoDB keyed by callId. Transcript and cue updates must be emitted so UI can meet sub-500ms transcript display and <=500ms cue display targets."
+    },
+    {
+      "name": "EventBus: backend internal pub/sub",
+      "type": "event",
+      "description": "Sole internal communication mechanism; disallows direct handler-to-handler calls.",
+      "contract": "AC-12: All event-driven communication flows through EventBus; no direct handler-to-handler calls permitted. Stage completion, transcriptTurn publish, coachingCue publish, and post-call generation triggers MUST be communicated via EventBus."
+    },
+    {
+      "name": "AssemblyAI v3 Streaming adapter",
+      "type": "api",
+      "description": "Adapter for AssemblyAI v3 streaming diarized turns and event mapping to transcriptTurn.",
+      "contract": "AC-05/AC-12: Use AssemblyAI v3 streaming with format_turns=true and ForceEndpoint support. Adapter MUST emit diarized transcriptTurn events (speaker rep vs prospect) and include adapter timing metadata to validate sub-500ms UI display budget."
+    },
+    {
+      "name": "LLM Provider Router (Cerebras primary -> OpenAI fallback)",
+      "type": "shared-lib",
+      "description": "Unified structured-output router with transparent failover between Cerebras and OpenAI.",
+      "contract": "AC-10: On provider failure/degradation, transparently switch Cerebras -> OpenAI while preserving unified structured output schema used by extraction, cue triggering, call plan generation, and post-call generation. Constraint: model names are environment-configured only."
+    },
+    {
+      "name": "PCRC-LLM Handler orchestrator",
+      "type": "shared-lib",
+      "description": "Sole orchestrator for pre-call stages, sequential stage execution, and generation flows.",
+      "contract": "AC-03/AC-01/AC-02/AC-04/AC-07: PCRC-LLM Handler is the sole orchestrator for pre-call stages. It MUST run CR1-CR5, then P1-P5, then D1-D5 sequentially. Each stage completion MUST be gated by a fire-once completion event and enforced via Set<string> guards for exact-once per callId."
+    },
+    {
+      "name": "GuidebookStore (SPICED+MEDDPICC loader)",
+      "type": "shared-lib",
+      "description": "Loads guidebook JSON into an in-memory store at startup; serves question packs for missing fields.",
+      "contract": "AC-02: Must provide guidebook-derived question packs after framework selection returns SPICED (primary) + MEDDPICC (secondary)."
+    },
+    {
+      "name": "PrecallQuestionSchema loader",
+      "type": "shared-lib",
+      "description": "Loads precall-questions-schema.json defining Q1-Q3, required fields, and extraction rules.",
+      "contract": "AC-01/AC-08: Drives Q1-Q3 super-clarifying conversation and defines required fields. PCRC-LLM Handler MUST produce extraction outputs with confidenceTag ∈ {confirmed,inferred,assumed} for every extracted field."
+    },
+    {
+      "name": "MongoDB CallState repository",
+      "type": "database",
+      "description": "Persists call sessions, stage completion markers, call plans, post-call deliverables, and reconnect snapshots.",
+      "contract": "AC-09/AC-04/AC-07: Persist websocketCallStateSnapshot keyed by callId for reconnect rehydration without state loss. Persist callPlan with required fields and postCallDeliverables within 10 seconds of call end."
+    },
+    {
+      "name": "Cue Policy Service",
+      "type": "shared-lib",
+      "description": "Server-side enforcement for coaching cue non-intrusiveness (throttling) and suppression behavior.",
+      "contract": "AC-06: Enforce max 1 coaching cue per 30 seconds and suppress cues when transcription confidence drops. Ensure cues carry timing fields so UI can render within 500ms of trigger detection."
+    }
+  ],
+  "dataContracts": [
+    {
+      "entity": "ExtractedFieldValue",
+      "storage": "MongoDB under callSession and/or EventBus payloads scoped by callId",
+      "ownership": "PCRC-LLM Handler",
+      "notes": "AC-08: { fieldKey: string, value: any, confidenceTag: 'confirmed'|'inferred'|'assumed' }. ConfidenceTag MUST be present for all extracted fields."
+    },
+    {
+      "entity": "PrecallIntakeResult",
+      "storage": "MongoDB under callSession",
+      "ownership": "PCRC-LLM Handler",
+      "notes": "AC-01/AC-08: { callId, requiredFieldsStatus: { [fieldKey: string]: 'complete'|'missing' }, extractedFields: ExtractedFieldValue[], intakeCompletedAtIso? }."
+    },
+    {
+      "entity": "StageCompletionEvent",
+      "storage": "transient via EventBus (optional debug mirror in MongoDB)",
+      "ownership": "PCRC-LLM Handler",
+      "notes": "AC-03/AC-12 exact-once: { eventType:'stageCompleted', callId, stageGroup:'CR'|'Persona'|'Demographics', stageId:'CR1'..'CR5'|'P1'..'P5'|'D1'..'D5', completedAtIso, attemptSequence }. Exactly once per callId+stageId enforced via Set<string> guards."
+    },
+    {
+      "entity": "FrameworkSelectionResult",
+      "storage": "MongoDB under callSession",
+      "ownership": "PCRC-LLM Handler",
+      "notes": "AC-02: { callId, primaryFramework:'SPICED', secondaryFramework:'MEDDPICC', missingFieldQuestionPackRefs: string[], selectedAtIso }."
+    },
+    {
+      "entity": "CallPlan",
+      "storage": "MongoDB under callSession",
+      "ownership": "PCRC-LLM Handler",
+      "notes": "AC-04: { callId, objective:string, priorities:string[3], risks:string[2], targetNextStep:string, unknowns:string[] }."
+    },
+    {
+      "entity": "transcriptTurn",
+      "storage": "EventBus -> WebSocket; optional persistence",
+      "ownership": "AssemblyAI v3 adapter",
+      "notes": "AC-05: { callId, turnSequence:number, speaker:'rep'|'prospect', text:string, adapterPublishedAtMs:number, sttConfidence?: number }. adapterPublishedAtMs enables verifying sub-500ms render budget."
+    },
+    {
+      "entity": "coachingCue",
+      "storage": "EventBus -> WebSocket; optional persistence",
+      "ownership": "Cue Policy Service / PCRC-LLM trigger logic",
+      "notes": "AC-06: { callId, cueSequence:number, cueText:string, triggerType:string, triggeredAtIso:string, uiDeadlineMs:number, throttlingWindowMs: number, suppressionApplied:boolean, suppressionReason?:string }. Server-side throttling <=1 cue per 30s and suppression when transcription confidence drops."
+    },
+    {
+      "entity": "websocketCallStateSnapshot",
+      "storage": "MongoDB under callSession",
+      "ownership": "MongoDB CallState repository",
+      "notes": "AC-09: { callId, currentStage:{stageGroup:'CR'|'Persona'|'Demographics'|'PostCall', stageId?:string}, completedStageIds:string[], lastTranscriptTurnSequence?:number, lastCueSequence?:number, frameworkSelectionPresent:boolean, updatedAtIso }."
+    },
+    {
+      "entity": "postCallDeliverables",
+      "storage": "MongoDB under callSession",
+      "ownership": "PCRC-LLM Handler",
+      "notes": "AC-07 exact shape: { callId, generatedAtIso, summary:string, scorecard:{categories:string[8]}, strength:string, improvementArea:string, practiceRecommendation:string }. Must be generated within 10 seconds of call end."
+    }
+  ],
+  "scalability": {
+    "expectedLoad": "Single-user private tool. Live call: frequent transcriptTurn updates; coaching cues throttled to max 1 per 30 seconds (AC-06). Pre-call and post-call include LLM-driven extraction/generation operations (AC-01/AC-07).",
+    "bottlenecks": [
+      "AssemblyAI->WebSocket->UI timing for transcript display (AC-05).",
+      "Trigger detection->Cue policy->WebSocket->UI timing for cues (AC-06).",
+      "UI render stability under concurrent transcript and cue updates (AC-11).",
+      "Reconnect rehydration time for state restoration (AC-09).",
+      "Provider failover tail latency and schema consistency (AC-10)."
+    ],
+    "mitigations": [
+      "Use timestamp fields (adapterPublishedAtMs, uiDeadlineMs) to measure and enforce budgets in automated tests (AC-05/AC-06).",
+      "Enforce cue throttling and suppression server-side via Cue Policy Service (AC-06).",
+      "Require frontend OnPush + explicit markForCheck for transcript/cue async updates (AC-11).",
+      "Persist websocketCallStateSnapshot keyed by callId and optimize rehydration to markers only (AC-09).",
+      "Standardize unified structured outputs in LLM Provider Router (AC-10)."
+    ]
+  },
+  "securityBaseline": {
+    "authMethod": "Assumed TBD: Contract does not specify auth. For operational readiness, implement at least a single-user session gate to prevent unauthorized access to WebSocket call streams and callId snapshot data (assumption, required for AC-09 leakage risk).",
+    "dataClassification": "Assumed sensitive: live transcripts (diarized), extracted confidence-tagged fields, coaching cues, call plans, and post-call deliverables.",
+    "threatVectors": [
+      "Unauthorized WebSocket access leaking transcriptTurn/coachingCue content (AC-09).",
+      "Call state bleed/cross-call leakage via incorrect callId scoping and snapshot retrieval (AC-09).",
+      "Duplicate/incorrect stage completion due to repeated triggers without exact-once enforcement (AC-03).",
+      "Prompt injection via transcript content altering extraction/cue outputs (AC-01/AC-06).",
+      "Malformed structured outputs during LLM failover breaking cue/plan/post-call generation (AC-10)."
+    ],
+    "mitigations": [
+      "Enforce callId authorization/scoping on WebSocket and snapshot retrieval (assumption for AC-09).",
+      "Enforce Set<string> exact-once guards for StageCompletionEvent publication (AC-03).",
+      "Validate outgoing payloads against data contract schemas before emitting to clients (AC-08/AC-06/AC-04/AC-07).",
+      "Keep unified schema across failover via LLM Provider Router (AC-10).",
+      "Server-side cue policy ensures non-intrusive behavior regardless of client behavior (AC-06)."
+    ]
+  },
+  "adrs": [
+    {
+      "id": "ADR-001",
+      "title": "EventBus-only internal communication (AC-12)",
+      "status": "accepted",
+      "context": "AC-12: All event-driven communication flows through EventBus — no direct handler-to-handler calls. Constraint: All backend handler communication must flow through EventBus pub/sub.",
+      "decision": "Implement backend modules so they communicate exclusively through EventBus pub/sub. Disallow direct handler-to-handler calls via code review policy and automated checks where possible.",
+      "consequences": "Ensures AC-12 compliance and makes stage/streaming flows observable via event logs."
+    },
+    {
+      "id": "ADR-002",
+      "title": "PCRC-LLM Handler sole orchestrator with exact-once stage completion guards (AC-03)",
+      "status": "accepted",
+      "context": "AC-03: CR1-CR5, P1-P5, D1-D5 stages complete sequentially with fire-once completion event. Constraint: PCRC-LLM Handler is sole orchestrator; old handlers disabled. Constraint: stage completion events must fire exactly once per callId enforced via Set<string> guards.",
+      "decision": "Centralize stage flow in PCRC-LLM Handler. Maintain per-call Set<string> for emitted stageIds and only publish StageCompletionEvent once per callId+stageId. Enforce sequential progression in orchestration logic.",
+      "consequences": "Prevents duplicate stage transitions across retries/reconnects and satisfies AC-03."
+    },
+    {
+      "id": "ADR-003",
+      "title": "Confidence-tagged extraction loop until schema-required fields are complete (AC-01, AC-08)",
+      "status": "accepted",
+      "context": "AC-01: Q1-Q3 intake continues with LLM-driven extraction and follow-ups until required fields filled. AC-08: extracted data carries confidence tags. Dependency: precall-questions-schema.json defines required fields and extraction rules.",
+      "decision": "Use precall-questions-schema.json to define required fields. Produce ExtractedFieldValue outputs with confidenceTag for every extracted field. Continue interaction until requiredFieldsStatus indicates all required fields are complete.",
+      "consequences": "Makes AC-08 and AC-01 verifiable and ensures deterministic stop conditions."
+    },
+    {
+      "id": "ADR-004",
+      "title": "Transparent LLM failover via Provider Router preserving unified structured outputs (AC-10)",
+      "status": "accepted",
+      "context": "AC-10: failover switches between Cerebras and OpenAI transparently on provider failure. Constraint: model names not hardcoded; use env defaults.",
+      "decision": "Implement LLM Provider Router used by PCRC-LLM Handler. Attempt Cerebras first; on failure/degradation fall back to OpenAI while keeping identical structured output schema for downstream processing.",
+      "consequences": "Satisfies AC-10 and reduces risk of client/render breakages during failover."
+    },
+    {
+      "id": "ADR-005",
+      "title": "Sub-500ms diarized transcript updates using AssemblyAI streaming hot path (AC-05)",
+      "status": "accepted",
+      "context": "AC-05: speaker diarization at sub-500ms latency via AssemblyAI streaming.",
+      "decision": "Enable AssemblyAI v3 streaming with format_turns=true and ForceEndpoint support. Convert events directly into transcriptTurn and attach adapterPublishedAtMs for measurable latency enforcement.",
+      "consequences": "Provides a verifiable latency path to meet AC-05."
+    },
+    {
+      "id": "ADR-006",
+      "title": "Server-side coaching cue policy: <=500ms render, throttling, and suppression (AC-06)",
+      "status": "accepted",
+      "context": "AC-06: cues appear within 500ms of trigger detection; throttled to max 1 per 30 seconds; suppressible when transcription confidence drops.",
+      "decision": "Cue policy service enforces throttling <=1 per 30 seconds and suppression based on transcription confidence. Cues include uiDeadlineMs to support meeting the 500ms render deadline.",
+      "consequences": "Meets AC-06 behavioral constraints and prevents cue spam."
+    },
+    {
+      "id": "ADR-007",
+      "title": "WebSocket reconnect state restoration without losing call state (AC-09)",
+      "status": "accepted",
+      "context": "AC-09: reconnects automatically (max 5 attempts, 3s delay) without losing call state.",
+      "decision": "Persist websocketCallStateSnapshot keyed by callId containing currentStage, completedStageIds, and lastTranscriptTurnSequence/lastCueSequence. On reconnect, rehydrate state from snapshot and resume streaming using sequence markers so history is not lost.",
+      "consequences": "Satisfies AC-09 and preserves user experience continuity."
+    },
+    {
+      "id": "ADR-008",
+      "title": "Post-call deliverables generation within 10 seconds of call end (AC-07)",
+      "status": "accepted",
+      "context": "AC-07: post-call summary, scorecard, lessons generated within 10 seconds of call end.",
+      "decision": "Trigger postCallDeliverables generation on call-end event and enforce a strict timing budget to produce the required structured deliverables in the specified schema within 10 seconds.",
+      "consequences": "Satisfies AC-07 end-to-end loop responsiveness."
+    }
+  ],
+  "metadata": {
+    "derivedFrom": "tpm-contract.json",
+    "confidenceMap": {
+      "interfaces": "confirmed",
+      "dataContracts": "confirmed",
+      "scalability": "assumed",
+      "securityBaseline": "assumed",
+      "adrs": "confirmed"
+    },
+    "gaps": [
+      "Auth method is not specified in the contract; securityBaseline.authMethod is assumed TBD for readiness verification (AC-09 leakage risk).",
+      "The contract does not specify the exact field name/type for transcription confidence used for cue suppression; implementation must map AssemblyAI confidence to cue suppression rule while maintaining AC-06."
+    ]
+  }
+}

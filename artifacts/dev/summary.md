@@ -1,0 +1,3 @@
+**Technical Summary**
+
+The repository implements a minimal “sales‑coach” MVP as a Node.js service written in TypeScript. It uses Express (or a similar HTTP framework) to expose API endpoints defined in `src/routes.ts`, with the application entry point in `src/index.ts`. The TypeScript source is compiled to CommonJS JavaScript in the `dist` folder (`index.js`, `routes.js`) along with source‑map files for debugging. Core configuration files include `package.json` (dependencies & scripts), `tsconfig.json` (compiler options), and a `README.md` that documents the project. The codebase follows a clear separation of concerns: source (`src/`) vs. build output (`dist/`), and each route module is exported and imported using ES‑module syntax.
